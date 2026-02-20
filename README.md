@@ -27,6 +27,8 @@ Open `http://localhost:8000`.
 - `POST /api/v1/session/stop`
 - `POST /api/v1/audio/pause`
 - `POST /api/v1/audio/resume`
+- `POST /api/v1/agent/approve`
+- `POST /api/v1/agent/replay-macro`
 - `POST /api/v1/browser/navigate`
 - `POST /api/v1/browser/click`
 - `POST /api/v1/browser/type`

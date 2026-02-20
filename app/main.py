@@ -107,6 +107,26 @@ async def resume_listening():
     return agent.set_listening(True)
 
 
+@app.post("/api/v1/agent/approve")
+async def approve_sensitive_action():
+    agent = get_agent()
+    ensure_browser_ready(agent)
+    try:
+        return await agent.approve_sensitive_action()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/v1/agent/replay-macro")
+async def replay_macro():
+    agent = get_agent()
+    ensure_browser_ready(agent)
+    try:
+        return await agent.replay_macro()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @app.post("/api/v1/browser/navigate")
 async def browser_navigate(payload: NavigateRequest):
     agent = get_agent()

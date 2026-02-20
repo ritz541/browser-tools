@@ -83,6 +83,8 @@
         <button onclick="stopSession()">Stop Session</button>
         <button onclick="pauseListening()">Pause Listening</button>
         <button onclick="resumeListening()">Resume Listening</button>
+        <button onclick="approveSensitive()">Approve Sensitive</button>
+        <button onclick="replayMacro()">Replay Macro</button>
         <button onclick="getStatus()">Refresh Status</button>
       </div>
       <p>Push-to-talk: hold <b>Space</b> to resume listening, release to pause.</p>
@@ -207,6 +209,16 @@
 
     async function resumeListening() {
       try { setStatus(await api("/api/v1/audio/resume", "POST")); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function approveSensitive() {
+      try { setStatus(await api("/api/v1/agent/approve", "POST")); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function replayMacro() {
+      try { setStatus(await api("/api/v1/agent/replay-macro", "POST")); }
       catch (e) { setStatus({ error: e.message }); }
     }
 
