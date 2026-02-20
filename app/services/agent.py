@@ -42,12 +42,14 @@ class VoiceBrowserAgent:
         self.listening_enabled = True
         self.screenshot_interval_seconds = SCREENSHOT_INTERVAL_SECONDS
         self.last_screenshot_sent_at = 0.0
+        self.screenshot_dirty = True
         self.last_tool_name: str | None = None
         self.last_tool_repeat_count = 0
         self.tool_failure_counts: dict[str, int] = {}
         self.approval_required = False
         self.pending_sensitive_tool: dict[str, Any] | None = None
         self.macro_steps: list[dict[str, Any]] = []
+        self.is_model_speaking = False
 
         self._task: asyncio.Task | None = None
 
@@ -362,6 +364,7 @@ class VoiceBrowserAgent:
 
         if record_macro and name not in {"replay_macro", "approve_sensitive_action"}:
             self.macro_steps.append({"name": name, "args": dict(args)})
+        self.screenshot_dirty = True
         return result
 
     async def start_browser(self):
@@ -489,17 +492,17 @@ class VoiceBrowserAgent:
             try:
                 if self.session and self.page:
                     url = self.page.url
-                    now = asyncio.get_running_loop().time()
-                    interval_elapsed = (now - self.last_screenshot_sent_at) >= self.screenshot_interval_seconds
-                    if url != self.last_url or interval_elapsed:
+                    url_changed = url != self.last_url
+                    if url_changed or self.screenshot_dirty:
                         self.last_url = url
                         img = await self.page.screenshot(type="jpeg", quality=70)
                         await self.session.send_realtime_input(
                             media=types.Blob(data=img, mime_type="image/jpeg")
                         )
-                        self.last_screenshot_sent_at = now
+                        self.last_screenshot_sent_at = asyncio.get_running_loop().time()
+                        self.screenshot_dirty = False
                         print("📸 Screenshot sent")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(self.screenshot_interval_seconds)
             except Exception as e:
                 print("Screenshot error:", e)
                 await asyncio.sleep(1)
@@ -572,6 +575,9 @@ class VoiceBrowserAgent:
     async def send_audio(self):
         while self.running:
             try:
+                if self.is_model_speaking:
+                    await asyncio.sleep(0.05)
+                    continue
                 data = await self.audio_input_queue.get()
                 if self.session is None:
                     continue
@@ -604,14 +610,33 @@ class VoiceBrowserAgent:
                                 if isinstance(data, str):
                                     data = base64.b64decode(data)
                                 await self.audio_output_queue.put(data)
+                                self.is_model_speaking = True
                                 self.playback_chunks += 1
                     if response.tool_call:
-                        responses = [
-                            await self.handle_tool_call(fc)
-                            for fc in response.tool_call.function_calls
-                        ]
+                        responses = []
+                        for idx, fc in enumerate(response.tool_call.function_calls):
+                            if idx == 0:
+                                responses.append(await self.handle_tool_call(fc))
+                                continue
+
+                            responses.append(
+                                types.FunctionResponse(
+                                    id=fc.id,
+                                    name=fc.name,
+                                    response={
+                                        "status": "error",
+                                        "message": (
+                                            "Only one tool call is allowed per turn. "
+                                            "Ask user confirmation before next tool."
+                                        ),
+                                    },
+                                )
+                            )
                         await self.session.send_tool_response(function_responses=responses)
             except Exception as e:
+                if "1011" in str(e) and "Deadline expired" in str(e):
+                    print("Live connection expired (1011).")
+                    raise RuntimeError("LIVE_DEADLINE_EXPIRED") from e
                 print("Receive error:", e)
                 await asyncio.sleep(0.3)
 
@@ -626,8 +651,12 @@ class VoiceBrowserAgent:
         try:
             while self.running:
                 try:
-                    data = await self.audio_output_queue.get()
+                    data = await asyncio.wait_for(self.audio_output_queue.get(), timeout=0.25)
                     stream.write(data)
+                    if self.audio_output_queue.empty():
+                        self.is_model_speaking = False
+                except asyncio.TimeoutError:
+                    self.is_model_speaking = False
                 except Exception as e:
                     print("Playback error:", e)
                     if self.last_model_text:
@@ -642,81 +671,95 @@ class VoiceBrowserAgent:
     async def _run(self):
         try:
             await self.start_browser()
-
-            config = types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                tools=[types.Tool(function_declarations=self.get_tools())],
-                system_instruction=types.Content(
-                    parts=[
-                        types.Part(
-                            text=(
-                                "You are a voice-controlled browser assistant.\n\n"
-                                "You can control a real web browser using tools.\n\n"
-                                "CRITICAL RULES:\n"
-                                "- You are controlling a real browser.\n"
-                                "- You MUST ONLY use the provided tools.\n"
-                                "- You MUST NOT generate CSS selectors, XPath, or Playwright code.\n"
-                                "- You MUST NOT guess DOM structure.\n"
-                                "- If an action fails twice, ask the user what to do next.\n"
-                                "- If sensitive info is involved, request approval before proceeding.\n"
-                                "- You can request extract_text(), list_inputs(), or detect_forms() to understand the page.\n"
-                                "- Never repeat the same tool call more than twice.\n\n"
-                                "Rules:\n"
-                                "- NEVER invent CSS selectors or XPath.\n"
-                                "- NEVER guess DOM structure.\n"
-                                "- ONLY use the provided tools.\n"
-                                "- Do NOT attempt to log in or enter passwords unless the user explicitly asks.\n"
-                                "- Always ask before entering sensitive information (email, phone, OTP, password).\n"
-                                "- If a tool fails twice, stop and ask the user what to do.\n"
-                                "- Do NOT repeat the same tool call more than twice.\n"
-                                "- Use screenshots to understand the page when unsure.\n\n"
-                                "Advanced tools:\n"
-                                "- Use extract_text / read_page_summary to read content.\n"
-                                "- Use detect_forms / list_inputs before filling unknown forms.\n"
-                                "- When sensitive action is blocked, call approve_sensitive_action only after user consent.\n"
-                                "- Use replay_macro when the user asks to repeat the last flow.\n\n"
-                                "How to act:\n"
-                                "- Decide the next best action\n"
-                                "- Call ONE tool at a time\n"
-                                "- After navigation or form filling, briefly describe what you see\n"
-                                "- Ask what the user wants to do next\n\n"
-                                "Examples:\n"
-                                "Example 1:\n"
-                                "User: Open Google\n"
-                                "Assistant: navigate_to(url=\"https://google.com\")\n\n"
-                                "Example 2:\n"
-                                "User: Search for Python tutorials\n"
-                                "Assistant: fill_by_role(role=\"searchbox\", value=\"Python tutorials\")\n"
-                                "Assistant: press_key(key=\"Enter\")\n\n"
-                                "Example 3:\n"
-                                "User: Fill my name as Ritesh\n"
-                                "Assistant: fill_by_label(label=\"Name\", value=\"Ritesh\")\n\n"
-                                "Example 4:\n"
-                                "User: Click the first result\n"
-                                "Assistant: click_link(href_contains=\"python\")\n\n"
-                                "Example 5:\n"
-                                "User: Scroll down\n"
-                                "Assistant: scroll(direction=\"down\", amount=800)\n\n"
-                                "Example 6:\n"
-                                "User: Submit the form\n"
-                                "Assistant: click_button(text=\"Submit\")"
+            while self.running:
+                config = types.LiveConnectConfig(
+                    response_modalities=["AUDIO"],
+                    tools=[types.Tool(function_declarations=self.get_tools())],
+                    system_instruction=types.Content(
+                        parts=[
+                            types.Part(
+                                text=(
+                                    "You are a voice-controlled browser assistant.\n\n"
+                                    "You can control a real web browser using tools.\n\n"
+                                    "CRITICAL RULES:\n"
+                                    "- You are controlling a real browser.\n"
+                                    "- You MUST ONLY use the provided tools.\n"
+                                    "- You MUST NOT generate CSS selectors, XPath, or Playwright code.\n"
+                                    "- You MUST NOT guess DOM structure.\n"
+                                    "- If an action fails twice, ask the user what to do next.\n"
+                                    "- If sensitive info is involved, request approval before proceeding.\n"
+                                    "- You can request extract_text(), list_inputs(), or detect_forms() to understand the page.\n"
+                                    "- Never repeat the same tool call more than twice.\n"
+                                    "- After each successful tool call, describe what changed on screen and ask what to do next.\n"
+                                    "- Do not chain more than one tool call without user confirmation.\n\n"
+                                    "Rules:\n"
+                                    "- NEVER invent CSS selectors or XPath.\n"
+                                    "- NEVER guess DOM structure.\n"
+                                    "- ONLY use the provided tools.\n"
+                                    "- Do NOT attempt to log in or enter passwords unless the user explicitly asks.\n"
+                                    "- Always ask before entering sensitive information (email, phone, OTP, password).\n"
+                                    "- If a tool fails twice, stop and ask the user what to do.\n"
+                                    "- Do NOT repeat the same tool call more than twice.\n"
+                                    "- Use screenshots to understand the page when unsure.\n\n"
+                                    "Advanced tools:\n"
+                                    "- Use extract_text / read_page_summary to read content.\n"
+                                    "- Use detect_forms / list_inputs before filling unknown forms.\n"
+                                    "- When sensitive action is blocked, call approve_sensitive_action only after user consent.\n"
+                                    "- Use replay_macro when the user asks to repeat the last flow.\n\n"
+                                    "How to act:\n"
+                                    "- Decide the next best action\n"
+                                    "- Call ONE tool at a time\n"
+                                    "- After navigation or form filling, briefly describe what you see\n"
+                                    "- Ask what the user wants to do next\n\n"
+                                    "Examples:\n"
+                                    "Example 1:\n"
+                                    "User: Open Google\n"
+                                    "Assistant: navigate_to(url=\"https://google.com\")\n\n"
+                                    "Example 2:\n"
+                                    "User: Search for Python tutorials\n"
+                                    "Assistant: fill_by_role(role=\"searchbox\", value=\"Python tutorials\")\n"
+                                    "Assistant: press_key(key=\"Enter\")\n\n"
+                                    "Example 3:\n"
+                                    "User: Fill my name as Ritesh\n"
+                                    "Assistant: fill_by_label(label=\"Name\", value=\"Ritesh\")\n\n"
+                                    "Example 4:\n"
+                                    "User: Click the first result\n"
+                                    "Assistant: click_link(href_contains=\"python\")\n\n"
+                                    "Example 5:\n"
+                                    "User: Scroll down\n"
+                                    "Assistant: scroll(direction=\"down\", amount=800)\n\n"
+                                    "Example 6:\n"
+                                    "User: Submit the form\n"
+                                    "Assistant: click_button(text=\"Submit\")"
+                                )
                             )
-                        )
-                    ],
-                ),
-            )
-
-            async with self.client.aio.live.connect(model=self.model, config=config) as session:
-                self.session = session
-                self.last_screenshot_sent_at = 0.0
-
-                await asyncio.gather(
-                    self.listen_microphone(),
-                    self.send_audio(),
-                    self.receive_audio(),
-                    self.play_audio(),
-                    self.screenshot_loop(),
+                        ],
+                    ),
                 )
+
+                try:
+                    async with self.client.aio.live.connect(model=self.model, config=config) as session:
+                        self.session = session
+                        self.last_screenshot_sent_at = 0.0
+                        self.screenshot_dirty = True
+                        self.is_model_speaking = False
+
+                        await asyncio.gather(
+                            self.listen_microphone(),
+                            self.send_audio(),
+                            self.receive_audio(),
+                            self.play_audio(),
+                            self.screenshot_loop(),
+                        )
+                except RuntimeError as e:
+                    if "LIVE_DEADLINE_EXPIRED" in str(e) and self.running:
+                        print("Reconnecting Gemini Live after deadline expiry...")
+                        self.session = None
+                        self.is_model_speaking = False
+                        await asyncio.sleep(1)
+                        continue
+                    raise
+                break
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -766,6 +809,9 @@ class VoiceBrowserAgent:
     async def send_prompt(self, text: str):
         if not self.session:
             raise RuntimeError("session is not connected")
+        lower_text = text.lower()
+        if "what do you see" in lower_text or "what can you see" in lower_text:
+            self.screenshot_dirty = True
         await self.session.send_client_content(
             turns=types.Content(role="user", parts=[types.Part(text=text)]),
             turn_complete=True,
@@ -829,6 +875,7 @@ class VoiceBrowserAgent:
             "listening_enabled": self.listening_enabled,
             "screenshot_interval_seconds": self.screenshot_interval_seconds,
             "last_model_text": self.last_model_text,
+            "is_model_speaking": self.is_model_speaking,
             "approval_required": self.approval_required,
             "pending_sensitive_tool": self.pending_sensitive_tool,
             "macro_steps_count": len(self.macro_steps),

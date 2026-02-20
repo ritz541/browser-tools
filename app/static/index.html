@@ -137,6 +137,7 @@
       <h2>Live Screenshot</h2>
       <div class="row">
         <button onclick="refreshShot()">Refresh Screenshot</button>
+        <button onclick="toggleAutoShot()" id="autoShotBtn">Auto Update: ON</button>
       </div>
       <img id="shot" alt="browser screenshot" />
     </section>
@@ -260,6 +261,20 @@
       }
     }
 
+    let autoShotEnabled = true;
+    let autoShotTimer = null;
+    function startAutoShot() {
+      if (autoShotTimer) clearInterval(autoShotTimer);
+      autoShotTimer = setInterval(() => {
+        if (autoShotEnabled) refreshShot();
+      }, 2500);
+    }
+    function toggleAutoShot() {
+      autoShotEnabled = !autoShotEnabled;
+      document.getElementById("autoShotBtn").textContent = `Auto Update: ${autoShotEnabled ? "ON" : "OFF"}`;
+      if (autoShotEnabled) refreshShot();
+    }
+
     let pttActive = false;
     function isTypingTarget(target) {
       if (!target) return false;
@@ -280,6 +295,8 @@
     });
 
     getStatus();
+    refreshShot();
+    startAutoShot();
   </script>
 </body>
 </html>
