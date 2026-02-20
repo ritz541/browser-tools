@@ -1,0 +1,15 @@
+[project]
+name = "browser-tools"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.116.1",
+    "google>=3.0.0",
+    "google-genai>=1.64.0",
+    "numpy>=2.4.2",
+    "playwright>=1.58.0",
+    "pyaudio>=0.2.14",
+    "uvicorn>=0.35.0",
+]

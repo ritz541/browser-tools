@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gemini Live Browser</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --ink: #0f172a;
+      --muted: #5b6474;
+      --accent: #0b5fff;
+      --line: #d7deea;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top right, #dbe8ff, #f4f7fb 45%);
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 32px auto;
+      padding: 0 16px;
+      display: grid;
+      gap: 14px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 6px 18px rgba(31, 48, 91, 0.08);
+    }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    h2 { margin: 0 0 10px; font-size: 15px; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    input, textarea, button {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 11px;
+      font: inherit;
+    }
+    input, textarea { width: 100%; background: #fff; }
+    textarea { min-height: 76px; }
+    button {
+      cursor: pointer;
+      background: #fff;
+      transition: transform 100ms ease, background 120ms ease;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    button:active { transform: translateY(1px); }
+    .status {
+      font-family: "IBM Plex Mono", monospace;
+      white-space: pre-wrap;
+      font-size: 12px;
+      margin: 0;
+    }
+    .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    #shot {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>Gemini Live Browser</h1>
+      <p>Control voice session, clicks, inputs, and forms from one panel.</p>
+      <div class="row">
+        <input id="model" value="gemini-2.5-flash-native-audio-preview-12-2025" />
+        <button class="primary" onclick="startSession()">Start Session</button>
+        <button onclick="stopSession()">Stop Session</button>
+        <button onclick="pauseListening()">Pause Listening</button>
+        <button onclick="resumeListening()">Resume Listening</button>
+        <button onclick="getStatus()">Refresh Status</button>
+      </div>
+      <p>Push-to-talk: hold <b>Space</b> to resume listening, release to pause.</p>
+      <pre id="status" class="status">loading...</pre>
+    </section>
+
+    <section class="card">
+      <h2>Prompt</h2>
+      <textarea id="prompt" placeholder="Ask Gemini to browse and do tasks"></textarea>
+      <div class="row">
+        <button class="primary" onclick="sendPrompt()">Send Prompt</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Browser Controls</h2>
+      <div class="label">Navigate URL</div>
+      <div class="row">
+        <input id="url" placeholder="https://example.com" />
+        <button class="primary" onclick="navigateTo()">Go</button>
+      </div>
+
+      <div class="label" style="margin-top:10px;">Click</div>
+      <div class="row">
+        <input id="clickSelector" placeholder="CSS selector e.g. button[type=submit]" />
+        <button onclick="clickSelector()">Click Selector</button>
+      </div>
+      <div class="row">
+        <input id="clickText" placeholder="or click by visible text" />
+        <button onclick="clickText()">Click Text</button>
+      </div>
+
+      <div class="label" style="margin-top:10px;">Type Input</div>
+      <div class="row">
+        <input id="typeSelector" placeholder="input[name=q]" />
+        <input id="typeText" placeholder="text to type" />
+        <button onclick="typeInput()">Type</button>
+      </div>
+
+      <div class="label" style="margin-top:10px;">Fill Form (JSON)</div>
+      <textarea id="formJson" placeholder='{"fields":[{"selector":"input[name=email]","value":"you@example.com"}]}'></textarea>
+      <div class="row">
+        <button onclick="fillForm()">Fill Form</button>
+        <button onclick="submitForm()">Submit Form</button>
+        <button onclick="scrollDown()">Scroll Down</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Live Screenshot</h2>
+      <div class="row">
+        <button onclick="refreshShot()">Refresh Screenshot</button>
+      </div>
+      <img id="shot" alt="browser screenshot" />
+    </section>
+  </main>
+
+  <script>
+    async function api(path, method = "GET", body = null) {
+      const res = await fetch(path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : null
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+      return data;
+    }
+
+    function setStatus(data) {
+      document.getElementById("status").textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function getStatus() {
+      try { setStatus(await api("/api/v1/session/status")); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function startSession() {
+      const model = document.getElementById("model").value.trim();
+      try { setStatus(await api("/api/v1/session/start", "POST", { model })); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function stopSession() {
+      try { setStatus(await api("/api/v1/session/stop", "POST")); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function sendPrompt() {
+      const text = document.getElementById("prompt").value.trim();
+      if (!text) return;
+      try { setStatus(await api("/api/v1/session/prompt", "POST", { text })); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function navigateTo() {
+      const url = document.getElementById("url").value.trim();
+      if (!url) return;
+      try { setStatus(await api("/api/v1/browser/navigate", "POST", { url })); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function clickSelector() {
+      const selector = document.getElementById("clickSelector").value.trim();
+      if (!selector) return;
+      try { setStatus(await api("/api/v1/browser/click", "POST", { selector })); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function clickText() {
+      const text = document.getElementById("clickText").value.trim();
+      if (!text) return;
+      try { setStatus(await api("/api/v1/browser/click", "POST", { text })); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function pauseListening() {
+      try { setStatus(await api("/api/v1/audio/pause", "POST")); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function resumeListening() {
+      try { setStatus(await api("/api/v1/audio/resume", "POST")); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function typeInput() {
+      const selector = document.getElementById("typeSelector").value.trim();
+      const text = document.getElementById("typeText").value;
+      if (!selector) return;
+      try { setStatus(await api("/api/v1/browser/type", "POST", { selector, text })); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function fillForm() {
+      const raw = document.getElementById("formJson").value.trim();
+      if (!raw) return;
+      try {
+        const payload = JSON.parse(raw);
+        setStatus(await api("/api/v1/browser/fill-form", "POST", payload));
+      } catch (e) {
+        setStatus({ error: e.message });
+      }
+    }
+
+    async function submitForm() {
+      try { setStatus(await api("/api/v1/browser/submit", "POST", {})); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function scrollDown() {
+      try { setStatus(await api("/api/v1/browser/scroll", "POST", { direction: "down", amount: 700 })); }
+      catch (e) { setStatus({ error: e.message }); }
+    }
+
+    async function refreshShot() {
+      try {
+        const data = await api("/api/v1/browser/screenshot");
+        document.getElementById("shot").src = `data:${data.mime_type};base64,${data.image_base64}`;
+      } catch (e) {
+        setStatus({ error: e.message });
+      }
+    }
+
+    let pttActive = false;
+    function isTypingTarget(target) {
+      if (!target) return false;
+      const tag = (target.tagName || "").toLowerCase();
+      return tag === "input" || tag === "textarea" || target.isContentEditable;
+    }
+    window.addEventListener("keydown", async (e) => {
+      if (isTypingTarget(e.target)) return;
+      if (e.code !== "Space" || pttActive) return;
+      pttActive = true;
+      await resumeListening();
+    });
+    window.addEventListener("keyup", async (e) => {
+      if (isTypingTarget(e.target)) return;
+      if (e.code !== "Space") return;
+      pttActive = false;
+      await pauseListening();
+    });
+
+    getStatus();
+  </script>
+</body>
+</html>
